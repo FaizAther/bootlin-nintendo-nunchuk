@@ -1,0 +1,1 @@
+savedcmd_/home/xubuntu/linux-kernel-bbb-labs/modules/nfsroot/root/hello/hello_version.mod := printf '%s\n'   hello_version.o | awk '!x[$$0]++ { print("/home/xubuntu/linux-kernel-bbb-labs/modules/nfsroot/root/hello/"$$0) }' > /home/xubuntu/linux-kernel-bbb-labs/modules/nfsroot/root/hello/hello_version.mod

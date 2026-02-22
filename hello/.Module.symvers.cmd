@@ -1,0 +1,1 @@
+savedcmd_/home/xubuntu/linux-kernel-bbb-labs/modules/nfsroot/root/hello/Module.symvers :=  scripts/mod/modpost -M -m -a      -o /home/xubuntu/linux-kernel-bbb-labs/modules/nfsroot/root/hello/Module.symvers -T /home/xubuntu/linux-kernel-bbb-labs/modules/nfsroot/root/hello/modules.order -i Module.symvers -e 

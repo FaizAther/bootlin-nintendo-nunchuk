@@ -1,0 +1,11 @@
+*bash*
+.ash_history
+modules.order
+Module.symvers
+*.dwo
+*.ko
+*.mod
+*.mod.c
+*.mod.dwo
+*.mod.o
+*.o

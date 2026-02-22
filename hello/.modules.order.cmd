@@ -1,0 +1,1 @@
+savedcmd_/home/xubuntu/linux-kernel-bbb-labs/modules/nfsroot/root/hello/modules.order := {   echo /home/xubuntu/linux-kernel-bbb-labs/modules/nfsroot/root/hello/hello_version.o; :; } > /home/xubuntu/linux-kernel-bbb-labs/modules/nfsroot/root/hello/modules.order
