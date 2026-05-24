@@ -9,16 +9,26 @@
 #include <linux/miscdevice.h>
 #include <linux/fs.h>
 #include <linux/uaccess.h>
+#include <linux/interrupt.h>
+#include <linux/wait.h>
 
 #define SERIAL_RESET_COUNTER 0
 #define SERIAL_GET_COUNTER  1
+
+#define SERIAL_BUFSIZE 16
+
 
 
 struct serial_dev {
         void __iomem *regs;
         unsigned int counter;
         struct miscdevice miscdev;
+        char rx_buf[SERIAL_BUFSIZE];
+        unsigned int buf_rd;
+        unsigned int buf_wr;
+        wait_queue_head_t wait;
 };
+
 
 // struct serial_dev *serial;
 
@@ -110,20 +120,24 @@ static ssize_t serial_read(struct file *file, char __user *user_buffer, size_t c
 {
         struct serial_dev *serial = file->private_data;
         size_t bytes_read = 0;
-        char c;
 
-        if (count == 0)
+        if (count == 0) {
                 return 0;
+        }
+        
+        wait_event_interruptible(serial->wait, serial->buf_rd != serial->buf_wr);
+
+        if (serial->buf_rd == serial->buf_wr) {
+                return 0;
+        }
 
         // Check if there is data available in the hardware Rx FIFO
         // UART_LSR_DR indicates 'Data Ready'
-        if (reg_read(serial, UART_LSR) & UART_LSR_DR) {
-                c = reg_read(serial, UART_RX); // Read byte from Rx register
-                
-                if (copy_to_user(user_buffer, &c, 1))
+        while (serial->buf_rd != serial->buf_wr && bytes_read < count) {
+                if (copy_to_user(user_buffer+bytes_read, serial->rx_buf + serial->buf_rd, 1))
                         return -EFAULT;
-                
-                bytes_read = 1;
+                serial->buf_rd = (serial->buf_rd + 1) % SERIAL_BUFSIZE;
+                ++bytes_read;
         }
 
         // Return 0 if no data is available (non-blocking behaviour)
@@ -160,6 +174,20 @@ struct platform_device {
 };
 */
 
+static irqreturn_t serial_irq_handler(int irq, void *dev_id)
+{
+        pr_info("hello irq{%d}\n", irq);
+        struct serial_dev *serial = (struct serial_dev *)dev_id;
+        char c;
+        while (reg_read(serial, UART_LSR) & UART_LSR_DR) {
+                c = reg_read(serial, UART_RX); // Read byte from Rx register
+                pr_info("byte read %c\n", c);
+                serial->rx_buf[serial->buf_wr] = c;
+                serial->buf_wr = (serial->buf_wr + 1) % SERIAL_BUFSIZE;
+        }
+        wake_up(&serial->wait);
+        return IRQ_HANDLED;
+}
 
 static int serial_probe(struct platform_device *pdev)
 {
@@ -167,6 +195,7 @@ static int serial_probe(struct platform_device *pdev)
         unsigned int uartclk;
         unsigned int baud_divisor;
         int ret;
+        int irq_num;
 
         pr_info("Called %s\n", __func__);
         pr_info("platform_device: %p\n", pdev);
@@ -204,6 +233,8 @@ static int serial_probe(struct platform_device *pdev)
         reg_write(serial, UART_LCR_WLEN8, UART_LCR);
         reg_write(serial, 0x00, UART_OMAP_MDR1);
         reg_write(serial, UART_FCR_CLEAR_RCVR | UART_FCR_CLEAR_XMIT, UART_FCR);
+        reg_write(serial, UART_IER_RDI, UART_IER);
+
         pr_info("uartclk from DT: %u\n", uartclk);
         pr_info("initial LSR: 0x%08x\n", reg_read(serial, UART_LSR));
         serial_putchar(serial, 'H');
@@ -230,6 +261,27 @@ static int serial_probe(struct platform_device *pdev)
                 pm_runtime_disable(&pdev->dev);
                 return ret;
         }
+
+        irq_num = platform_get_irq(pdev, 0);
+        if (irq_num < 0) {
+                dev_err(&pdev->dev, "Failed to get IRQ\n");
+                misc_deregister(&serial->miscdev);
+                pm_runtime_put_sync(&pdev->dev);
+                pm_runtime_disable(&pdev->dev);
+                return irq_num;
+        }
+
+        ret = devm_request_irq(&pdev->dev, irq_num, serial_irq_handler, 0, "serial_irq", serial);
+        if (ret) {
+                dev_err(&pdev->dev, "Failed to request IRQ\n");
+                misc_deregister(&serial->miscdev);
+                pm_runtime_put_sync(&pdev->dev);
+                pm_runtime_disable(&pdev->dev);
+                return ret;
+        }
+
+        init_waitqueue_head(&serial->wait);
+        serial->buf_rd = serial->buf_wr = 0;
 
         dev_info(&pdev->dev, "Misc device registered successfully\n");
         return 0;
