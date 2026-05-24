@@ -11,6 +11,8 @@
 #include <linux/uaccess.h>
 #include <linux/interrupt.h>
 #include <linux/wait.h>
+#include <linux/poll.h>
+
 
 #define SERIAL_RESET_COUNTER 0
 #define SERIAL_GET_COUNTER  1
@@ -149,12 +151,31 @@ static int serial_close(struct inode *inode, struct file *file)
         return 0;
 }
 
+static __poll_t serial_poll(struct file *file, struct poll_table_struct *wait)
+{
+        struct serial_dev *serial = file->private_data;
+        __poll_t mask = 0;
+
+        // Register the wait queue with the poll table
+        poll_wait(file, &serial->wait, wait);
+
+        // Check if there is data available to be read
+        if (serial->buf_rd != serial->buf_wr)
+                mask |= EPOLLIN | EPOLLRDNORM;
+
+        // You can also signal write readiness if your TX FIFO isn't full
+        mask |= EPOLLOUT | EPOLLWRNORM; 
+
+        return mask;
+}
+
 static const struct file_operations serial_fops = {
         .owner          = THIS_MODULE,
         .open           = serial_open,
         .release        = serial_close,
         .write          = serial_write,
         .read           = serial_read,
+        .poll           = serial_poll,
         .unlocked_ioctl = serial_ioctl,
 };
 

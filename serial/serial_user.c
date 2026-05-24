@@ -68,6 +68,7 @@ int main(int argc, char *argv[]) {
 
         // Case A: User typed a character on stdin
         if (fds[0].revents & POLLIN) {
+            fprintf(stderr, "stdin rx\n");
             ssize_t r = read(STDIN_FILENO, buf, sizeof(buf));
             if (r > 0) {
                 // Pipe directly down to the UART driver
@@ -77,6 +78,7 @@ int main(int argc, char *argv[]) {
 
         // Case B: The UART received a character from remote end
         if (fds[1].revents & POLLIN) {
+            fprintf(stderr, "uart rx\n");
             ssize_t r = read(uart_fd, buf, sizeof(buf));
             if (r > 0) {
                 // Pipe directly out to user terminal screen
