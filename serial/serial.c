@@ -29,6 +29,7 @@ struct serial_dev {
         unsigned int buf_rd;
         unsigned int buf_wr;
         wait_queue_head_t wait;
+        spinlock_t serial_lock;
 };
 
 
@@ -200,11 +201,14 @@ static irqreturn_t serial_irq_handler(int irq, void *dev_id)
         pr_info("hello irq{%d}\n", irq);
         struct serial_dev *serial = (struct serial_dev *)dev_id;
         char c;
+        unsigned long flags;
         while (reg_read(serial, UART_LSR) & UART_LSR_DR) {
                 c = reg_read(serial, UART_RX); // Read byte from Rx register
                 pr_info("byte read %c\n", c);
+                spin_lock_irqsave(&serial->serial_lock, flags);
                 serial->rx_buf[serial->buf_wr] = c;
                 serial->buf_wr = (serial->buf_wr + 1) % SERIAL_BUFSIZE;
+                spin_unlock_irqrestore(&serial->serial_lock, flags);
         }
         wake_up(&serial->wait);
         return IRQ_HANDLED;
@@ -303,6 +307,8 @@ static int serial_probe(struct platform_device *pdev)
 
         init_waitqueue_head(&serial->wait);
         serial->buf_rd = serial->buf_wr = 0;
+
+        spin_lock_init(&serial->serial_lock);
 
         dev_info(&pdev->dev, "Misc device registered successfully\n");
         return 0;
