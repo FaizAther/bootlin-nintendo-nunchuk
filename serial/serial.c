@@ -14,9 +14,16 @@
 #include <linux/poll.h>
 #include <linux/dmaengine.h>
 #include <linux/dma-mapping.h>
+#include <linux/completion.h>
 
-#define OMAP_UART_SCR_DMAMODE_CTL3 0x7
-#define OMAP_UART_SCR_TX_TRIG_GRANU1 BIT(6)
+#define OMAP_UART_FCR_TX_TRIG		4 // TX trigger
+#define OMAP_UART_FCR_RX_TRIG		6 // RX trigger
+#define OMAP_UART_SCR_RX_TRIG_GRANU1	BIT(7) // Trigger granularity for RX
+#define OMAP_UART_SCR_TX_TRIG_GRANU1	BIT(6) // Trigger granularity for TX
+#define OMAP_UART_SCR_TX_EMPTY		BIT(3) // TX empty
+#define OMAP_UART_SCR_DMAMODE_1		BIT(1) // DMA mode 1
+#define OMAP_UART_SCR_DMAMODE_CTL	BIT(0) // DMA mode control
+#define OMAP_UART_TX_TRIGGER		1 // TX trigger
 
 
 #define SERIAL_RESET_COUNTER 0
@@ -42,6 +49,10 @@ struct serial_dev {
         dma_addr_t dma_map_resource;
         dma_addr_t fifo_dma_addr;
         struct device *dev;
+        bool txongoing;
+        struct completion txcomplete;
+        spinlock_t serial_dma_tx_lock;
+        bool dma_enabled;
 };
 
 
@@ -182,20 +193,117 @@ static __poll_t serial_poll(struct file *file, struct poll_table_struct *wait)
         return mask;
 }
 
+static void serial_dma_tx_callback(void *param)
+{
+        struct serial_dev *serial = param;
+
+        complete(&serial->txcomplete);
+}
+
+static void serial_dma_tx_done(struct serial_dev *serial, unsigned long flags)
+{
+        serial->txongoing = false;
+        spin_unlock_irqrestore(&serial->serial_dma_tx_lock, flags);
+}
+
 static ssize_t serial_write_dma(struct file *file, const char __user *user_buffer, size_t count, loff_t *offset)
 {
-        return 0;
+        unsigned long flags;
+        struct serial_dev *serial = file->private_data;
+        struct dma_async_tx_descriptor *desc;
+        dma_addr_t dma_addr = 0;
+        size_t dma_len;
+        unsigned int i;
+        int ret;
+
+        if (!count)
+                return 0;
+
+        count = min_t(size_t, count, SERIAL_BUFSIZE);
+
+        spin_lock_irqsave(&serial->serial_dma_tx_lock, flags);
+        if (serial->txongoing) {
+                spin_unlock_irqrestore(&serial->serial_dma_tx_lock, flags);
+                return -EBUSY;
+        }
+        serial->txongoing = true;
+        spin_unlock_irqrestore(&serial->serial_dma_tx_lock, flags);
+
+        if (copy_from_user(serial->tx_buf, user_buffer, count)) {
+                spin_lock_irqsave(&serial->serial_dma_tx_lock, flags);
+                serial_dma_tx_done(serial, flags);
+                return -EFAULT;
+        }
+
+        if (count < 4) {
+                for (i = 0; i < count; i++)
+                        reg_write(serial, serial->tx_buf[i], UART_TX);
+                spin_lock_irqsave(&serial->serial_dma_tx_lock, flags);
+                serial_dma_tx_done(serial, flags);
+                return count;
+        }
+
+        dma_len = count - 1;
+        reinit_completion(&serial->txcomplete);
+
+        dma_addr = dma_map_single(serial->dev, serial->tx_buf + 1, dma_len, DMA_TO_DEVICE);
+        if (dma_mapping_error(serial->dev, dma_addr)) {
+                dev_err(serial->dev, "Failed to map DMA: %pad\n", &dma_addr);
+                spin_lock_irqsave(&serial->serial_dma_tx_lock, flags);
+                serial_dma_tx_done(serial, flags);
+                return -ENOMEM;
+        }
+
+        desc = dmaengine_prep_slave_single(serial->txchan, dma_addr, dma_len,
+                                           DMA_MEM_TO_DEV,
+                                           DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
+        if (!desc) {
+                dev_err(serial->dev, "Failed to prepare DMA descriptor\n");
+                dma_unmap_single(serial->dev, dma_addr, dma_len, DMA_TO_DEVICE);
+                spin_lock_irqsave(&serial->serial_dma_tx_lock, flags);
+                serial_dma_tx_done(serial, flags);
+                return -EIO;
+        }
+
+        desc->callback = serial_dma_tx_callback;
+        desc->callback_param = serial;
+
+        ret = dma_submit_error(dmaengine_submit(desc));
+        if (ret) {
+                dev_err(serial->dev, "Failed to submit DMA: %d\n", ret);
+                dma_unmap_single(serial->dev, dma_addr, dma_len, DMA_TO_DEVICE);
+                spin_lock_irqsave(&serial->serial_dma_tx_lock, flags);
+                serial_dma_tx_done(serial, flags);
+                return -EIO;
+        }
+
+        dma_sync_single_for_device(serial->dev, dma_addr, dma_len, DMA_TO_DEVICE);
+        dma_async_issue_pending(serial->txchan);
+        reg_write(serial, serial->tx_buf[0], UART_TX);
+
+        ret = wait_for_completion_interruptible(&serial->txcomplete);
+        dma_unmap_single(serial->dev, dma_addr, dma_len, DMA_TO_DEVICE);
+
+        spin_lock_irqsave(&serial->serial_dma_tx_lock, flags);
+        serial_dma_tx_done(serial, flags);
+
+        if (ret)
+                return ret;
+
+        return count;
 }
 
 void serial_cleanup_dma(struct platform_device *pdev, struct serial_dev *serial)
 {
-        int err = dmaengine_terminate_sync(serial->txchan);
-        if (err) {
-                dev_err(serial->dev, "Failed to terminate DMA: %d\n", err);
-        }
-        dma_unmap_resource(serial->dev, serial->fifo_dma_addr, 4, DMA_TO_DEVICE, 0);
+        if (!serial->dma_enabled)
+                return;
+
+        dmaengine_terminate_sync(serial->txchan);
+        dma_unmap_resource(serial->dev, serial->fifo_dma_addr, 4,
+                           DMA_TO_DEVICE, 0);
         dma_release_channel(serial->txchan);
-        return;
+        serial->txchan = NULL;
+        serial->dma_enabled = false;
 }
 
 static struct file_operations serial_fops_pio = {
@@ -254,27 +362,51 @@ static irqreturn_t serial_irq_handler(int irq, void *dev_id)
 
 int serial_init_dma(struct platform_device *pdev, struct serial_dev *serial)
 {
-
-        serial->miscdev.fops = &serial_fops_dma;
         struct dma_slave_config txconf = {};
-        struct resource *res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-        if (!res) {
-                return -ENOMEM;
-        }
-        serial->fifo_dma_addr = dma_map_resource(serial->dev, res->start + UART_TX * 4, 4, DMA_TO_DEVICE, 0);
+        struct resource *res;
+        u32 fcr;
+        int ret;
+
+        res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+        if (!res)
+                return -ENODEV;
+
+        serial->fifo_dma_addr = dma_map_resource(serial->dev,
+                                                 res->start + UART_TX * 4, 4,
+                                                 DMA_TO_DEVICE, 0);
         if (dma_mapping_error(serial->dev, serial->fifo_dma_addr)) {
-                dev_err(serial->dev, "Failed to map resource: %pad\n", &serial->fifo_dma_addr);
+                dev_err(serial->dev, "Failed to map resource: %pad\n",
+                        &serial->fifo_dma_addr);
                 return -ENOMEM;
         }
+
         txconf.direction = DMA_MEM_TO_DEV;
         txconf.dst_addr_width = DMA_SLAVE_BUSWIDTH_1_BYTE;
+        txconf.dst_maxburst = OMAP_UART_TX_TRIGGER;
         txconf.dst_addr = serial->fifo_dma_addr;
-        int ret = dmaengine_slave_config(serial->txchan, &txconf);
+        ret = dmaengine_slave_config(serial->txchan, &txconf);
         if (ret) {
                 dev_err(serial->dev, "Failed to configure DMA: %d\n", ret);
+                dma_unmap_resource(serial->dev, serial->fifo_dma_addr, 4,
+                                   DMA_TO_DEVICE, 0);
                 return ret;
         }
-        reg_write(serial, OMAP_UART_SCR_DMAMODE_CTL3 | OMAP_UART_SCR_TX_TRIG_GRANU1, UART_OMAP_SCR);
+
+        fcr = UART_FCR_ENABLE_FIFO |
+              (OMAP_UART_TX_TRIGGER & 3) << OMAP_UART_FCR_TX_TRIG |
+              (OMAP_UART_TX_TRIGGER & 3) << OMAP_UART_FCR_RX_TRIG;
+        reg_write(serial, fcr, UART_FCR);
+
+        reg_write(serial, OMAP_UART_SCR_RX_TRIG_GRANU1 |
+                        OMAP_UART_SCR_TX_TRIG_GRANU1 |
+                        OMAP_UART_SCR_TX_EMPTY |
+                        OMAP_UART_SCR_DMAMODE_1 |
+                        OMAP_UART_SCR_DMAMODE_CTL,
+                  UART_OMAP_SCR);
+
+        init_completion(&serial->txcomplete);
+        serial->dma_enabled = true;
+        dev_info(serial->dev, "TX DMA enabled\n");
         return 0;
 }
 
@@ -323,7 +455,7 @@ static int serial_probe(struct platform_device *pdev)
         reg_write(serial, UART_LCR_WLEN8, UART_LCR);
         reg_write(serial, 0x00, UART_OMAP_MDR1);
         reg_write(serial, UART_FCR_CLEAR_RCVR | UART_FCR_CLEAR_XMIT, UART_FCR);
-        reg_write(serial, UART_IER_RDI, UART_IER);
+        reg_write(serial, UART_IER_RDI, UART_IER); // IER Register: Enable Receiver Interrupt
 
         pr_info("uartclk from DT: %u\n", uartclk);
         pr_info("initial LSR: 0x%08x\n", reg_read(serial, UART_LSR));
@@ -341,11 +473,42 @@ static int serial_probe(struct platform_device *pdev)
                 return -ENOMEM;
         }
 
-        serial->miscdev.parent = &pdev->dev;  // Tie node lifecycle to device tree entry
+        serial->miscdev.parent = &pdev->dev;
+        serial->miscdev.fops = &serial_fops_pio;
+
+        init_waitqueue_head(&serial->wait);
+        serial->buf_rd = serial->buf_wr = 0;
+        spin_lock_init(&serial->serial_lock);
+        spin_lock_init(&serial->serial_dma_tx_lock);
+
+        if (!of_property_present(pdev->dev.of_node, "dmas"))
+                dev_warn(&pdev->dev, "No dmas property on %pOF (rebuild DTB and reboot)\n",
+                         pdev->dev.of_node);
+        else if (!of_find_property(pdev->dev.of_node, "dma-names", NULL))
+                dev_warn(&pdev->dev, "No dma-names on %pOF\n", pdev->dev.of_node);
+
+        serial->txchan = dma_request_chan(&pdev->dev, "tx");
+        if (IS_ERR(serial->txchan)) {
+                dev_warn(&pdev->dev, "Failed to request TX channel on %pOF: %pe, using PIO\n",
+                         pdev->dev.of_node, serial->txchan);
+                serial->txchan = NULL;
+        } else {
+                ret = serial_init_dma(pdev, serial);
+                if (ret) {
+                        dma_release_channel(serial->txchan);
+                        serial->txchan = NULL;
+                } else {
+                        serial->miscdev.fops = &serial_fops_dma;
+                }
+        }
 
         ret = misc_register(&serial->miscdev);
         if (ret) {
                 dev_err(&pdev->dev, "Failed to register misc device\n");
+                if (serial->dma_enabled)
+                        serial_cleanup_dma(pdev, serial);
+                else if (serial->txchan)
+                        dma_release_channel(serial->txchan);
                 pm_runtime_put_sync(&pdev->dev);
                 pm_runtime_disable(&pdev->dev);
                 return ret;
@@ -369,21 +532,8 @@ static int serial_probe(struct platform_device *pdev)
                 return ret;
         }
 
-        init_waitqueue_head(&serial->wait);
-        serial->buf_rd = serial->buf_wr = 0;
-
-        spin_lock_init(&serial->serial_lock);
-
-        serial->txchan = dma_request_chan(&pdev->dev, pdev->name);
-        if (IS_ERR(serial->txchan)) {
-                ret = PTR_ERR(serial->txchan);
-                dev_err(&pdev->dev, "Failed to request TX channel: %pe\n", serial->txchan);
-                serial->miscdev.fops = &serial_fops_pio;
-        } else {
-                serial_init_dma(pdev, serial);
-        }
-
-        dev_info(&pdev->dev, "Misc device registered successfully\n");
+        dev_info(&pdev->dev, "Misc device registered successfully (%s)\n",
+                 serial->dma_enabled ? "DMA TX" : "PIO TX");
         return 0;
 }
 
@@ -393,8 +543,8 @@ static int serial_remove(struct platform_device *pdev)
         // serial_putchar(serial, '}');
         struct serial_dev *serial = platform_get_drvdata(pdev);
 
-        // Clean up user space exposed interfaces before power-down
         misc_deregister(&serial->miscdev);
+        serial_cleanup_dma(pdev, serial);
 
         pm_runtime_put_sync(&pdev->dev);
         pm_runtime_disable(&pdev->dev);
