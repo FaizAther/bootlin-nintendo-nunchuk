@@ -70,6 +70,7 @@ int main(int argc, char *argv[]) {
         if (fds[0].revents & POLLIN) {
             fprintf(stderr, "stdin rx\n");
             ssize_t r = read(STDIN_FILENO, buf, sizeof(buf));
+            fprintf(stderr, "sending %d bytes\n", r);
             if (r > 0) {
                 // Pipe directly down to the UART driver
                 write(uart_fd, buf, r);
