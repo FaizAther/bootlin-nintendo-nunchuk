@@ -113,8 +113,8 @@ void nunchuk_poll(struct input_dev *input)
 		pr_alert("Failed to read registers: %d\n", pressed.err);
 		return;
 	}
-	input_report_key(input, ABS_X, pressed.x);
-	input_report_key(input, ABS_Y, pressed.y);
+	input_report_abs(input, ABS_X, pressed.x);
+	input_report_abs(input, ABS_Y, pressed.y);
 	input_report_key(input, BTN_C, pressed.c);
 	input_report_key(input, BTN_Z, pressed.z);
 /*
@@ -126,31 +126,31 @@ void nunchuk_poll(struct input_dev *input)
 	// 0x80,0x80 center.
 	if (pressed.x >= 0x77 && pressed.x <= 0x81 && pressed.y >= 0xf5 && pressed.y <= 0xff) {
 		// input_report_key(input, BTN_X, 1);
-		// input_report_key(input, KEY_UP, 1);
+		input_report_key(input, KEY_UP, 1);
 	} else {
 		// input_report_key(input, BTN_X, 0);
-		// input_report_key(input, KEY_UP, 0);
+		input_report_key(input, KEY_UP, 0);
 	}
 	if (pressed.x >= 0x77 && pressed.x <= 0x81 && pressed.y >= 0x00 && pressed.y <= 0x05) {
 		// input_report_key(input, BTN_A, 1);
-		// input_report_key(input, KEY_DOWN, 1);
+		input_report_key(input, KEY_DOWN, 1);
 	} else {
 		// input_report_key(input, BTN_A, 0);
-		// input_report_key(input, KEY_DOWN, 0);
+		input_report_key(input, KEY_DOWN, 0);
 	}
 	if (pressed.x >= 0xf5 && pressed.x <= 0xff && pressed.y >= 0x77 && pressed.y <= 0x81) {
 		// input_report_key(input, BTN_B, 1);
-		// input_report_key(input, KEY_RIGHT, 1);
+		input_report_key(input, KEY_RIGHT, 1);
 	} else {
 		// input_report_key(input, BTN_B, 0);
-		// input_report_key(input, KEY_RIGHT, 0);
+		input_report_key(input, KEY_RIGHT, 0);
 	}
 	if (pressed.x >= 0x00 && pressed.x <= 0x05 && pressed.y >= 0x77 && pressed.y <= 0x81) {
 		// input_report_key(input, BTN_Y, 1);
-		// input_report_key(input, KEY_LEFT, 1);
+		input_report_key(input, KEY_LEFT, 1);
 	} else {
 		// input_report_key(input, BTN_Y, 0);
-		// input_report_key(input, KEY_LEFT, 0);
+		input_report_key(input, KEY_LEFT, 0);
 	}
 
 	input_sync(input);
@@ -171,6 +171,7 @@ int nunchuk_probe(struct device *dev, struct regmap *regmap)
 	input->name = "Nintendo Wii Nunchuk";
 	input->id.bustype = BUS_I2C;
 	set_bit(EV_KEY, input->evbit);
+	set_bit(EV_ABS, input->evbit);
 	set_bit(BTN_C, input->keybit);
 	set_bit(BTN_Z, input->keybit);
 	
@@ -193,10 +194,10 @@ int nunchuk_probe(struct device *dev, struct regmap *regmap)
 	// set_bit(BTN_X, input->keybit);
 	// set_bit(BTN_TR2, input->keybit);
 
-	// set_bit(KEY_LEFT, input->keybit);
-	// set_bit(KEY_RIGHT, input->keybit);
-	// set_bit(KEY_UP, input->keybit);
-	// set_bit(KEY_DOWN, input->keybit);
+	set_bit(KEY_LEFT, input->keybit);
+	set_bit(KEY_RIGHT, input->keybit);
+	set_bit(KEY_UP, input->keybit);
+	set_bit(KEY_DOWN, input->keybit);
 
 	// int input_setup_polling(struct input_dev *dev,
 	// 		void (*poll_fn)(struct input_dev *dev));
