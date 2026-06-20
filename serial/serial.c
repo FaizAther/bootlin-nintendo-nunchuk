@@ -210,6 +210,7 @@ static void serial_dma_tx_callback(void *param)
 static void serial_dma_tx_done(struct serial_dev *serial, unsigned long flags)
 {
         serial->txongoing = false;
+        dev_dbg(serial->miscdev.parent, "serial_dma_tx_done called\n");
         spin_unlock_irqrestore(&serial->serial_dma_tx_lock, flags);
 }
 
@@ -222,6 +223,7 @@ static ssize_t serial_write_dma(struct file *file, const char __user *user_buffe
         size_t dma_len;
         unsigned int i;
         int ret;
+        dev_dbg(serial->miscdev.parent, "serial_write_dma called with count=%zu\n", count);
 
         if (!count)
                 return 0;
