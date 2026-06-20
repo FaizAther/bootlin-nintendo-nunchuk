@@ -15,6 +15,7 @@
 #include <linux/dmaengine.h>
 #include <linux/dma-mapping.h>
 #include <linux/completion.h>
+#include <linux/dev_printk.h>
 
 #define OMAP_UART_FCR_TX_TRIG		4 // TX trigger
 #define OMAP_UART_FCR_RX_TRIG		6 // RX trigger
@@ -113,6 +114,8 @@ static ssize_t serial_write_pio(struct file *file, const char __user *user_buffe
         size_t bytes_to_copy;
         size_t i;
 
+        dev_dbg(serial->miscdev.parent, "serial_write called with count=%zu\n", count);
+
         if (count == 0)
                 return 0;
 
@@ -127,6 +130,7 @@ static ssize_t serial_write_pio(struct file *file, const char __user *user_buffe
         // Safely loop through our private kernel memory space
         for (i = 0; i < bytes_to_copy; i++) {
                 serial_putchar(serial, kbuf[i]);
+                dev_dbg(serial->miscdev.parent, "Wrote char '%c' to UART\n", kbuf[i]);
         }
 
         return bytes_to_copy;
@@ -147,6 +151,8 @@ static ssize_t serial_read_pio(struct file *file, char __user *user_buffer, size
         struct serial_dev *serial = file->private_data;
         size_t bytes_read = 0;
 
+        dev_dbg(serial->miscdev.parent, "serial_read called with count=%zu\n", count);
+
         if (count == 0) {
                 return 0;
         }
@@ -162,6 +168,7 @@ static ssize_t serial_read_pio(struct file *file, char __user *user_buffer, size
         while (serial->buf_rd != serial->buf_wr && bytes_read < count) {
                 if (copy_to_user(user_buffer+bytes_read, serial->rx_buf + serial->buf_rd, 1))
                         return -EFAULT;
+                dev_dbg(serial->miscdev.parent, "Read char '%c' from UART\n", serial->rx_buf[serial->buf_rd]);
                 serial->buf_rd = (serial->buf_rd + 1) % SERIAL_BUFSIZE;
                 ++bytes_read;
         }
@@ -344,13 +351,13 @@ struct platform_device {
 
 static irqreturn_t serial_irq_handler(int irq, void *dev_id)
 {
-        pr_info("hello irq{%d}\n", irq);
         struct serial_dev *serial = (struct serial_dev *)dev_id;
+        dev_dbg(serial->miscdev.parent, "hello irq{%d}\n", irq);
         char c;
         unsigned long flags;
         while (reg_read(serial, UART_LSR) & UART_LSR_DR) {
                 c = reg_read(serial, UART_RX); // Read byte from Rx register
-                pr_info("byte read %c\n", c);
+                dev_dbg(serial->miscdev.parent, "byte read %c\n", c);
                 spin_lock_irqsave(&serial->serial_lock, flags);
                 serial->rx_buf[serial->buf_wr] = c;
                 serial->buf_wr = (serial->buf_wr + 1) % SERIAL_BUFSIZE;

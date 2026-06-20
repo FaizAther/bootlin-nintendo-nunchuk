@@ -9,3 +9,5 @@ Module.symvers
 *.mod.dwo
 *.mod.o
 *.o
+*.cmd
+*.exe
